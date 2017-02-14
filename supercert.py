@@ -4,18 +4,17 @@
 # author: suyanchun
 # 2017-2-12
 
-# 用途1: ./supercert.py 证书文件，验证证书合法性，验证证书链是否完整
-# 用途2: ./supercert.py 站点url，验证站点证书合法性，以及检测站点支持的ssl版本
-# 依赖pyopenssl
+# 用途1: ./supercert.py 证书文件，验证证书合法性
+# 用途2: ./supercert.py 证书文件 full ，验证证书链完整性，自动补全证书链
+# 用途3: ./supercert.py 站点url，验证站点证书合法性，以及检测站点支持的ssl版本
+# 依赖3yopenssl
 
 #from httplib2 import request
 import datetime
-from OpenSSL.crypto import load_certificate,dump_certificate,FILETYPE_PEM,FILETYPE_ASN1
+from OpenSSL.crypto import X509,load_certificate,dump_certificate,FILETYPE_PEM,FILETYPE_ASN1
 import re
-
 import sys,os
 
-# url正则表达式
 urlreg = re.compile(
 	r'^((?:http|ftp)s?://)' # http:// or https://
 	r'((?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|' #domain...
@@ -24,24 +23,66 @@ urlreg = re.compile(
 	r'((?::\d+))?' # optional port
 	r'(?:/?|[/?]\S+)?$', re.IGNORECASE)
 
-# 加载证书
-def load_local_cert(cert_path):
-	if not os.path.isfile(cert_path):
-		return 1
+def check_pem_buff(str_buff):
+	"""
+	check str_buff is pem type and return list of cert or None
+	:param str_buff: cert chain string
+	:return list of strings of cert
+	"""
+	str_buff = str_buff.strip()
+	pem_tag_begin = "-----BEGIN CERTIFICATE-----"
+	pem_tag_end = "-----END CERTIFICATE-----"
+	first_begin_tag_index = str_buff.find(pem_tag_begin)
+	first_end_tag_index = str_buff.find(pem_tag_end)
+	if first_begin_tag_index == 0 and first_end_tag_index != -1:
+		nindex = 0
+		cert_buff_list = []
+		while (nindex < len(str_buff)):
+			begin_tag_index = str_buff.find(pem_tag_begin,nindex)
+			end_tag_index = str_buff.find(pem_tag_end,nindex)
+			nindex = end_tag_index + len(pem_tag_end)
+			temp_buff = str_buff[begin_tag_index:nindex]
+			cert_buff_list.append(temp_buff)
+		return cert_buff_list
+	else:
+		return None
 
-	with open(cert_path) as cf:
+def load_local_cert(cert_file_path):
+	"""
+	load local path certificate file
+	:param cert_file_path: path of the certificate
+	:return list of OpenSSL.crypto.X509 objects or None
+	"""
+	if not os.path.isfile(cert_file_path):
+		return None
+
+	cert_chain_list = []
+	with open(cert_file_path) as cf:
 		buff = cf.read()
-		try:
-			cert_content = load_certificate(FILETYPE_PEM,buff)
-		except Exception,e:
+		chk_buff = check_pem_buff(buff)
+		if chk_buff != None:
+			for x in chk_buff:
+				try:
+					cert_object = load_certificate(FILETYPE_PEM,x)
+				except Exception,e:
+					return None
+				else:
+					cert_chain_list.append(cert_object)
+		else:
 			try:
-				cert_content = load_certificate(FILETYPE_ASN1,buff)
+				cert_object = load_certificate(FILETYPE_ASN1,buff)
 			except Exception,e:
-				print e
 				return None
-		return cert_content
+			else:
+				cert_chain_list.append(cert_object)
+		return cert_chain_list
 
-def load_site_cert(site_url):
+def load_site_cert(site_url,ssl_version=None):
+	"""
+	:param site_url: url with scheme as https://a.b.com/a
+	:param ssl_version: ssl version available ssl2 ssl3 tls1 tls11 tls12
+	:return list of OpenSSL.crypto.X509 objects or None
+	"""
 	m = re.match(urlreg,site_url)
 	hostname = m.group(2)
 	if m.group(3) == None:
@@ -50,13 +91,16 @@ def load_site_cert(site_url):
 		port = m.group(3)
 		port = int(port[1:len(port)])
 	from socket import socket,gethostbyname
-	from OpenSSL.SSL import Connection, Context,SSLv3_METHOD,TLSv1_METHOD,TLSv1_1_METHOD,TLSv1_2_METHOD,WantReadError  
-	SSL_VER_LIST = [SSLv3_METHOD,TLSv1_METHOD,TLSv1_1_METHOD,TLSv1_2_METHOD]
-	for method in SSL_VER_LIST:
+	from OpenSSL.SSL import Connection, Context,TLSv1_METHOD,WantReadError,VERIFY_PEER
+	try:
 		ip=gethostbyname(hostname)
+	except Exception,e:
+		print e
+		return None
+	try:
 		s = socket()  
 		s.connect((ip, port))  
-		sslcontext = Context(method)  
+		sslcontext = Context(TLSv1_METHOD)  
 		sslcontext.set_timeout(30)  
 		c = Connection(sslcontext, s)  
 		c.set_connect_state() 
@@ -64,51 +108,59 @@ def load_site_cert(site_url):
 		proto_v_name = c.get_protocol_version_name()
 		print "try to handshake with server: %s using %s" % ( ip , proto_v_name )  
 		c.do_handshake()  
-		cert = c.get_peer_certificate()
-		print cert
-		print "issuer: ",cert.get_issuer().get_components()  
+		cert_chain = c.get_peer_cert_chain()
 		c.shutdown()  
-	return 0
-	#cert = c.get_peer_certificate()  
-	cert_chain = c.get_peer_cert_chain()
-	print cert_chain
-	for cert in cert_chain:
-		print "issuer: ",cert.get_issuer().get_components()  
-		print "subject: ",cert.get_subject().get_components()  
+		s.close() 
+	except Exception,e:
+		print e
+		return None
+	else:
+		return cert_chain
 
-	c.shutdown()  
-	s.close() 
+def read_cert_object(x509_object):
+	"""
+	:param x509_object: OpenSSL.crypto.X509 object
+	:return self_define dict
+	"""
+	ret_obj = {}
 
-# 读取证书信息
-def read_cert_info(cert_content):
-	ret_obj = {
-		"err_msg":"",
-		"err_code":"0",
-		"cert_CN":"",
-		"cert_not_after":"",
-		"cert_subject_altname":""
-	}
+	idate_str = x509_object.get_notAfter()
+	idate_str = idate_str[0:14]
+	idate = datetime.datetime.strptime(idate_str,"%Y%m%d%H%M%S" )
+	subject = x509_object.get_subject()
+	issuer = x509_object.get_issuer()
 
-	idate_str = cert_content.get_notAfter()
-	#idate = datetime.datetime.strptime(idate_str,"%Y%m%d%H%M%S" )
-	idate = idate_str[0:14]
-	subject = cert_content.get_subject()
-
-	ret_obj["cert_CN"] = subject.CN
-	ret_obj["cert_not_after"] = idate
-	for x in range(cert_content.get_extension_count()):
-		c_ext = cert_content.get_extension(x)
-		if c_ext.get_short_name() == "subjectAltName":
-			ret_obj["cert_subject_altname"] = c_ext.__str__()
+	ret_obj["subject_CN"] = subject.CN
+	ret_obj["notAfter"] = idate
+	ret_obj["issuer_CN"] = issuer.CN
+	ret_obj["issuer_O"] = issuer.O
 	
+	for x in range(x509_object.get_extension_count()):
+		c_ext = x509_object.get_extension(x)
+		if c_ext.get_short_name() == "authorityInfoAccess":
+			aia = c_ext.__str__().strip()
+			ca_issuer_uri_flag = "CA Issuers - URI:"
+			uri_pos = aia.find(ca_issuer_uri_flag)
+			if uri_pos != -1:
+				ret_obj["issuer_CA_URI"] = aia[(uri_pos+len(ca_issuer_uri_flag)):]
+		if c_ext.get_short_name() == "basicConstraints":
+			if c_ext.__str__().find("CA:TRUE") == 0:
+				ret_obj["is_CA"] = "True"
+			else:
+				ret_obj["is_CA"] = "False"
+		if c_ext.get_short_name() == "subjectAltName":
+			ret_obj["subject_AN"] = c_ext.__str__()
 	return ret_obj
 
 def main():
-	#cert_content = load_local_cert(sys.argv[1])
-	#if cert_content:
-	#	ret = read_cert_info(cert_content)
-	#	for x in ret:
-	#		print x,ret[x]
-	cert_content = load_site_cert(sys.argv[1])
+	if re.match(urlreg,sys.argv[1]):
+		clist = load_site_cert(sys.argv[1])
+	else:
+		clist = load_local_cert(sys.argv[1])
 
+	if clist:
+		for cobject in clist:
+			ret = read_cert_object(cobject)
+			for x in ret:
+				print x,":",ret[x]
 main()
