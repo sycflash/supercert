@@ -4,16 +4,23 @@
 # author: suyanchun
 # 2017-2-12
 
-# 用途1: ./supercert.py 证书文件，验证证书合法性
-# 用途2: ./supercert.py 证书文件 full ，验证证书链完整性，自动补全证书链
-# 用途3: ./supercert.py 站点url，验证站点证书合法性，以及检测站点支持的ssl版本
-# 依赖3yopenssl
+"""
+用途1: ./supercert.py 证书文件，验证证书合法性
+用途2: ./supercert.py 证书文件 full ，验证证书链完整性，自动补全证书链
+用途3: ./supercert.py 站点url，验证站点证书合法性，以及检测站点支持的ssl版本
+ 依赖: pyopenssl
+"""
 
-#from httplib2 import request
+from urllib import urlopen,urlencode
 import datetime
-from OpenSSL.crypto import X509,load_certificate,dump_certificate,FILETYPE_PEM,FILETYPE_ASN1
+from OpenSSL.crypto import X509,load_certificate,load_pkcs7_data,dump_certificate,FILETYPE_PEM,FILETYPE_ASN1
 import re
 import sys,os
+
+reload(sys)
+sys.setdefaultencoding("UTF-8")
+
+CA_BUNDLE_PATH = "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
 
 urlreg = re.compile(
 	r'^((?:http|ftp)s?://)' # http:// or https://
@@ -25,17 +32,17 @@ urlreg = re.compile(
 
 def check_pem_buff(str_buff):
 	"""
-	check str_buff is pem type and return list of cert or None
-	:param str_buff: cert chain string
-	:return list of strings of cert
+	- 检查str_buff字符串的内容是不是PEM格式证书
+	- 参数 str_buff: 证书内容
+	- 返回值: 返回PEM证书链字符串列表，或者None 
 	"""
 	str_buff = str_buff.strip()
 	pem_tag_begin = "-----BEGIN CERTIFICATE-----"
 	pem_tag_end = "-----END CERTIFICATE-----"
 	first_begin_tag_index = str_buff.find(pem_tag_begin)
 	first_end_tag_index = str_buff.find(pem_tag_end)
-	if first_begin_tag_index == 0 and first_end_tag_index != -1:
-		nindex = 0
+	if first_begin_tag_index != -1 and first_end_tag_index != -1:
+		nindex = first_begin_tag_index
 		cert_buff_list = []
 		while (nindex < len(str_buff)):
 			begin_tag_index = str_buff.find(pem_tag_begin,nindex)
@@ -49,9 +56,9 @@ def check_pem_buff(str_buff):
 
 def load_local_cert(cert_file_path):
 	"""
-	load local path certificate file
-	:param cert_file_path: path of the certificate
-	:return list of OpenSSL.crypto.X509 objects or None
+	- 加载本地证书文件，当前支持x509封装的PEM或DER格式证书
+	- 参数cert_file_path: 本地证书文件的(相对或绝对)路径
+	- 返回值: OpenSSL.crypto.X509 对象列表或者None 
 	"""
 	if not os.path.isfile(cert_file_path):
 		return None
@@ -59,29 +66,39 @@ def load_local_cert(cert_file_path):
 	cert_chain_list = []
 	with open(cert_file_path) as cf:
 		buff = cf.read()
+
 		chk_buff = check_pem_buff(buff)
+		
+		"""
+		read pem file type
+		"""
 		if chk_buff != None:
 			for x in chk_buff:
 				try:
 					cert_object = load_certificate(FILETYPE_PEM,x)
 				except Exception,e:
-					return None
+					pass
 				else:
 					cert_chain_list.append(cert_object)
+
+		"""
+		read der file type 
+		"""
+		try:
+			cert_object = load_certificate(FILETYPE_ASN1,buff)
+		except Exception,e:
+			pass
 		else:
-			try:
-				cert_object = load_certificate(FILETYPE_ASN1,buff)
-			except Exception,e:
-				return None
-			else:
-				cert_chain_list.append(cert_object)
+			cert_chain_list.append(cert_object)
+
 		return cert_chain_list
 
 def load_site_cert(site_url,ssl_version=None):
 	"""
-	:param site_url: url with scheme as https://a.b.com/a
-	:param ssl_version: ssl version available ssl2 ssl3 tls1 tls11 tls12
-	:return list of OpenSSL.crypto.X509 objects or None
+	加载站点证书并读取PEM格式证书链，例如https://a.b.com/a
+	- 参数 site_url: 携带协议的URL例如https://a.b.com/a
+	- 参数 ssl_version: ssl/tls 协议版本(ssl2 ssl3 tls1 tls11 tls12)
+	- 返回值: OpenSSL.crypto.X509 对象列表或者None
 	"""
 	m = re.match(urlreg,site_url)
 	hostname = m.group(2)
@@ -119,8 +136,9 @@ def load_site_cert(site_url,ssl_version=None):
 
 def read_cert_object(x509_object):
 	"""
-	:param x509_object: OpenSSL.crypto.X509 object
-	:return self_define dict
+	- 解析单个x509对象并返回解析结果，自定义字典
+	- 参数 x509_object: OpenSSL.crypto.X509 对象
+	- 返回值: 自定义字典,包含常见的x509格式信息
 	"""
 	ret_obj = {}
 
@@ -130,10 +148,9 @@ def read_cert_object(x509_object):
 	subject = x509_object.get_subject()
 	issuer = x509_object.get_issuer()
 
-	ret_obj["subject_CN"] = subject.CN
+	ret_obj["subject"] = subject.CN
 	ret_obj["notAfter"] = idate
-	ret_obj["issuer_CN"] = issuer.CN
-	ret_obj["issuer_O"] = issuer.O
+	ret_obj["issuer"] = issuer.CN
 	
 	for x in range(x509_object.get_extension_count()):
 		c_ext = x509_object.get_extension(x)
@@ -152,6 +169,43 @@ def read_cert_object(x509_object):
 			ret_obj["subject_AN"] = c_ext.__str__()
 	return ret_obj
 
+def verify_chain(cert_list):
+	"""
+	校验证书链
+	- 参数 cert_list: x509对象列表
+	"""
+	if not os.path.exists(CA_BUNDLE_PATH):
+		print "文件不存在:%s" % CA_BUNDLE_PATH
+		print "无法进行证书链校验!!!请安装openssl!!!"
+		return False
+	else:
+		with open(CA_BUNDLE_PATH) as ca_bundle_f:
+			ca_bundle = load_local_cert(ca_bundle_f.read())
+			ca_bundle_objects = [ read_cert_object(co) for co in ca_bundle ]
+			ca_bundle_subn = [ sn["subject_CN"] for sn in ca_bundle_objects ]
+			
+			chain = []
+			for x in cert_list:
+				xo = read_cert_object(x)
+				xo["verified"] = False
+				chain.append(xo)
+
+			issuer_last = ""
+			subject_last = ""
+			veri_depth = 0
+			for y in chain:
+				y["veri_depth"] = veri_depth
+				if subject_last == "":
+					issuer_last = y["issuer"]
+					subject_last = y["subject"]
+				if issuer_last == y["subject"]:
+					y["verified"] = True
+				if y["subject"] in ca_bundle_subn:
+					return True
+					break
+			
+			return False
+
 def main():
 	if re.match(urlreg,sys.argv[1]):
 		clist = load_site_cert(sys.argv[1])
@@ -159,7 +213,9 @@ def main():
 		clist = load_local_cert(sys.argv[1])
 
 	if clist:
+		print "Certificate Chain:"
 		for cobject in clist:
+			print "-"*40
 			ret = read_cert_object(cobject)
 			for x in ret:
 				print x,":",ret[x]
